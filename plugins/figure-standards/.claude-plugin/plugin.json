@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "figure-standards",
+  "displayName": "Figure Standards",
+  "description": "Publication-grade figure conventions for scientific data analysis: legend/panel/overlap/PDF+PNG+code.html, enforced via the /figure-standards:figure skill and a bundled drop-in matplotlib helper.",
+  "author": { "name": "Adesnik/Veit lab", "email": "hillel.adesnik@gmail.com" },
+  "keywords": ["figures", "matplotlib", "publication", "plotting", "data-analysis"],
+  "skills": "./skills/"
+}

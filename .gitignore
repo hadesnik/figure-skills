@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local figure-helper self-test / verification scratch output
+/_verify/
+*.overlap.txt
+*.code.html
+*.pdf
+*.png
+
+# macOS
+.DS_Store

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "figure-skills",
+  "description": "Team standards for publication-grade scientific-data-analysis figures.",
+  "owner": { "name": "Adesnik/Veit lab", "email": "hillel.adesnik@gmail.com" },
+  "plugins": [
+    {
+      "name": "figure-standards",
+      "source": "./plugins/figure-standards",
+      "description": "Enforces the lab figure conventions on every figure: bold-titled self-contained legend at 10 pt that describes each panel, 14 pt panel letters, all text >= 8 pt, PDF + PNG + clickable .code.html provenance, and a programmatic no-text-overlap check that must pass before a figure is done."
+    }
+  ]
+}
