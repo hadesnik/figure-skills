@@ -11,7 +11,8 @@ It is the single source of truth for the lab's six figure conventions:
    programmatic bounding-box check at save time (not by eyeballing).
 4. Every figure is saved as a **vector PDF + a PNG companion**, plus an
    auto-generated **``<fig>.code.html``** listing the functions used to build it,
-   linked from a clickable annotation in the PDF.
+   linked from a clickable annotation in the PDF. PDF/PS text is embedded as
+   **real, selectable/editable text** (``fonttype 42``), never vectorized outlines.
 5. The legend states, per panel, exactly what each panel shows.
 6. **All on-figure text is >= 8 pt** (the rcParams floor; the legend only ever
    shrinks toward 8 pt to dodge an overlap, never below).
@@ -32,6 +33,16 @@ from pathlib import Path
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 
+# Embed real text (not vectorized outlines) on any vector save, the moment this module
+# is imported. matplotlib's defaults are wrong for this: pdf/ps default to Type-3 fonts
+# (fonttype 3 -- not editable as live text in Illustrator, outlined by some renderers).
+# 42 = embed the actual TrueType font, so text stays selectable AND editable. Set here at
+# import (as well as in apply_style() below) so it holds even for scripts that save without
+# calling apply_style() and for multi-page PdfPages saves that bypass savefig(). rcParams
+# are process-global and read by the backend at save time, so this covers every save path.
+mpl.rcParams["pdf.fonttype"] = 42
+mpl.rcParams["ps.fonttype"] = 42
+
 
 def apply_style() -> None:
     """Apply a consistent publication style to matplotlib rcParams.
@@ -39,8 +50,15 @@ def apply_style() -> None:
     Every font size set here is **>= 8 pt** (convention 6): base 9, panel titles 10,
     axis labels 9, tick labels 8, matplotlib's own legend 8. Call once at import/startup
     before building figures.
+
+    Also forces ``pdf.fonttype``/``ps.fonttype = 42`` so PDF/EPS text is embedded as
+    real, selectable/editable TrueType text rather than matplotlib's default Type-3 /
+    outlined glyphs (convention 4).
     """
     mpl.rcParams.update({
+        # Real embedded text, not outlines -- see the module-level note above.
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
         "figure.dpi": 110,
         "savefig.dpi": 300,
         "savefig.bbox": "tight",
@@ -67,16 +85,22 @@ def savefig(fig, out_path, *, outdir=None, functions=None,
 
     ``out_path`` is the destination filename or path; if it has no extension it
     defaults to ``.pdf`` (vector, publication format). ``outdir`` optionally prepends a
-    directory (created if needed), so ``savefig(fig, "psth", outdir="figures/psth")``
-    writes ``figures/psth/psth.pdf``.
+    directory (created if needed).
+
+    File-type layout (convention 4): within each figure folder the three artifact types
+    are kept in sibling subfolders -- the vector ``.pdf`` in ``pdf/``, its ``.png``
+    companion in ``png/``, and the ``.code.html`` source listing in ``html/`` -- so a
+    folder holding many figures stays navigable. ``savefig(fig, "psth", outdir="figures/psth")``
+    therefore writes ``figures/psth/pdf/psth.pdf`` + ``figures/psth/png/psth.png`` +
+    ``figures/psth/html/psth.code.html``.
 
     What this writes (conventions 3 & 4):
 
-    - the **PDF** itself;
-    - a same-named **``.png``** companion when ``png_companion`` (default ``True``) --
-      this is what previews inline on GitHub / in a figures README;
-    - a self-contained **``<fig>.code.html``** source listing when ``functions`` is
-      given (an iterable of the callables used to build the figure, e.g.
+    - the **PDF** itself, into ``pdf/``;
+    - a same-named **``.png``** companion into ``png/`` when ``png_companion`` (default
+      ``True``) -- this is what previews inline on GitHub / in a figures README;
+    - a self-contained **``<fig>.code.html``** source listing into ``html/`` when
+      ``functions`` is given (an iterable of the callables used to build the figure, e.g.
       ``[main, collect, justified_legend]``) plus a small clickable "source code" link
       embedded in the PDF pointing at it. See :func:`write_code_listing`.
 
@@ -89,25 +113,40 @@ def savefig(fig, out_path, *, outdir=None, functions=None,
     ``strict=True`` to additionally raise once the figure is saved, so a batch run fails
     loudly instead of silently leaving a sidecar.
     """
-    path = Path(out_path)
+    raw = Path(out_path)
     if outdir is not None:
-        path = Path(outdir) / path
-    if not path.suffix:
-        path = path.with_name(path.name + ".pdf")        # publication default is vector PDF
-    path.parent.mkdir(parents=True, exist_ok=True)
+        raw = Path(outdir) / raw
+    if not raw.suffix:
+        raw = raw.with_name(raw.name + ".pdf")           # publication default is vector PDF
+    suffix = raw.suffix.lower()
+    stem = raw.stem
+    folder = raw.parent                                  # the figure folder
 
-    # Provenance: write the code listing first, then embed a clickable link to it.
-    # write_code_listing never raises (it degrades to None), so a figure always saves.
+    def _typed_dir(kind: str) -> Path:
+        """The ``pdf/``, ``png/`` or ``html/`` sibling folder inside this figure folder."""
+        d = folder / kind
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    # Route by type: an explicit "foo.png" is a PNG-only save into png/; otherwise the
+    # publication PDF goes into pdf/ (with its optional companion PNG into png/).
+    if suffix == ".png":
+        path = _typed_dir("png") / (stem + ".png")
+    else:
+        path = _typed_dir("pdf") / (stem + ".pdf")
+
+    # Provenance: write the code listing (into html/) first, then embed a clickable link
+    # to it. write_code_listing never raises (it degrades to None), so a figure always saves.
     if functions:
-        sidecar = write_code_listing(path, functions)
+        sidecar = write_code_listing(path, functions, sidecar_dir=_typed_dir("html"))
         if sidecar is not None:
             attach_source_link(fig, sidecar, link_text=link_text)
 
     fig.savefig(path)
-    if png_companion:
+    if png_companion and suffix != ".png":
         # PNGs carry no clickable link (raster has no annotations) -- the link text
         # simply renders as a small blue label, which is harmless.
-        fig.savefig(path.with_suffix(".png"))
+        fig.savefig(_typed_dir("png") / (stem + ".png"))
 
     # Mandatory self-check: no on-figure text may overlap another text or a panel.
     overlaps = []
@@ -118,6 +157,22 @@ def savefig(fig, out_path, *, outdir=None, functions=None,
             f"{len(overlaps)} text overlap(s) in {path.name}; "
             f"see {path.with_suffix('.overlap.txt').name} and fix before continuing.")
     return path
+
+
+def fig_dir(folder, kind: str) -> Path:
+    """Return (creating it) the ``pdf/``/``png/``/``html/`` subfolder of a figure folder.
+
+    The file-type layout convention (see :func:`savefig`) keeps each figure folder's PDFs,
+    PNGs and ``.code.html`` listings in sibling subfolders. Multi-page ``PdfPages`` scripts
+    that build their output path by hand (rather than going through :func:`savefig`) should
+    route it through here, e.g.::
+
+        pdf_path = fig_dir("figures/ccg", "pdf") / "ccg_rs_rs.pdf"
+        sidecar  = write_code_listing(pdf_path, funcs, sidecar_dir=fig_dir("figures/ccg", "html"))
+    """
+    d = Path(folder) / kind
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +205,9 @@ def attach_source_link(fig, sidecar, *, link_text: str = "▸ source code",
     t.set_gid("source-link")
 
 
-def write_code_listing(out_pdf: Path, functions, *, repo_root: Path | None = None) -> Path | None:
-    """Write a self-contained HTML listing of ``functions`` next to ``out_pdf``.
+def write_code_listing(out_pdf: Path, functions, *, repo_root: Path | None = None,
+                       sidecar_dir: Path | None = None) -> Path | None:
+    """Write a self-contained HTML listing of ``functions`` for ``out_pdf``.
 
     ``functions`` is an iterable of callables (and/or the script's own functions). Each
     is introspected for its ``file:line`` and source. Functions defined inside the
@@ -160,9 +216,12 @@ def write_code_listing(out_pdf: Path, functions, *, repo_root: Path | None = Non
     source can't be located are noted but not dumped, so the listing stays focused on the
     project's own code.
 
-    Returns the sidecar :class:`~pathlib.Path` (``<figname>.code.html`` beside the PDF)
-    or ``None`` if nothing could be listed. **Never raises** -- provenance must not be
-    able to break a figure save -- on error it prints a warning and returns ``None``.
+    Returns the sidecar :class:`~pathlib.Path` (``<figname>.code.html``) or ``None`` if
+    nothing could be listed. By default the sidecar is written **beside** ``out_pdf``;
+    pass ``sidecar_dir`` to place it elsewhere (``savefig`` passes the figure folder's
+    ``html/`` subfolder so the listing lands next to its siblings). **Never raises** --
+    provenance must not be able to break a figure save -- on error it prints a warning
+    and returns ``None``.
     """
     try:
         root = (repo_root or Path.cwd()).resolve()
@@ -193,7 +252,10 @@ def write_code_listing(out_pdf: Path, functions, *, repo_root: Path | None = Non
         if not in_repo and not external:
             return None
 
-        sidecar = out_pdf.parent / (out_pdf.stem + ".code.html")  # NOT with_suffix: stems hold dots
+        sidecar_name = out_pdf.stem + ".code.html"     # NOT with_suffix: stems hold dots
+        listing_dir = Path(sidecar_dir) if sidecar_dir is not None else out_pdf.parent
+        listing_dir.mkdir(parents=True, exist_ok=True)
+        sidecar = listing_dir / sidecar_name
         sidecar.write_text(_render_code_html(out_pdf.name, in_repo, external),
                            encoding="utf-8")
         return sidecar
