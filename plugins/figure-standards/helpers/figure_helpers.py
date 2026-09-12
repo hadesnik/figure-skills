@@ -80,7 +80,8 @@ def apply_style() -> None:
 
 def savefig(fig, out_path, *, outdir=None, functions=None,
             link_text: str = "▸ source code", png_companion: bool = True,
-            check_overlaps: bool = True, strict: bool = False) -> Path:
+            check_overlaps: bool = True, strict: bool = False,
+            detail=None, detail_x=(0.06, 0.94)) -> Path:
     """Save ``fig`` and return its path, enforcing the figure conventions.
 
     ``out_path`` is the destination filename or path; if it has no extension it
@@ -103,6 +104,13 @@ def savefig(fig, out_path, *, outdir=None, functions=None,
       ``functions`` is given (an iterable of the callables used to build the figure, e.g.
       ``[main, collect, justified_legend]``) plus a small clickable "source code" link
       embedded in the PDF pointing at it. See :func:`write_code_listing`.
+
+    Two legends (convention 8): pass ``detail=(title, body)`` and the PDF gets a SECOND
+    page holding the detailed legend, built by :func:`detail_legend_page` and sized to the
+    text. The figure page then carries only the brief journal-style caption, which is the
+    point of the split. ``detail_x`` is the ``(x0, x1)`` measure that page is justified to
+    -- pass the figure's own panel margins. The companion PNG is written per page, the
+    second as ``<name>_detail.png``, and BOTH pages go through the overlap gate below.
 
     Overlap gate (convention 3): when ``check_overlaps`` (default ``True``) the rendered
     text bounding boxes are checked; on any overlap a loud ``⚠ TEXT OVERLAP`` report is
@@ -142,16 +150,36 @@ def savefig(fig, out_path, *, outdir=None, functions=None,
         if sidecar is not None:
             attach_source_link(fig, sidecar, link_text=link_text)
 
-    fig.savefig(path)
+    # One page, or two when a detailed legend was given. Each page is checked and gets its
+    # own PNG; the clickable source link stays on the figure page, where a reader looks for
+    # it, rather than being repeated over the text page.
+    pages = [(fig, path.name, path.with_suffix(".overlap.txt"), stem)]
+    if detail is not None and suffix != ".png":
+        pages.append((detail_legend_page(fig.get_figwidth(), detail[0], detail[1],
+                                         x0=detail_x[0], x1=detail_x[1]),
+                      stem + " (detailed legend page)",
+                      path.with_name(stem + "_detail.overlap.txt"), stem + "_detail"))
+
+    if len(pages) == 1:
+        fig.savefig(path)
+    else:
+        from matplotlib.backends.backend_pdf import PdfPages   # only needed for 2-up
+        with PdfPages(path) as pdf:
+            for page, _, _, _ in pages:
+                pdf.savefig(page)
     if png_companion and suffix != ".png":
-        # PNGs carry no clickable link (raster has no annotations) -- the link text
-        # simply renders as a small blue label, which is harmless.
-        fig.savefig(_typed_dir("png") / (stem + ".png"))
+        for page, _, _, png_stem in pages:
+            # PNGs carry no clickable link (raster has no annotations) -- the link text
+            # simply renders as a small blue label, which is harmless.
+            page.savefig(_typed_dir("png") / (png_stem + ".png"))
 
     # Mandatory self-check: no on-figure text may overlap another text or a panel.
     overlaps = []
     if check_overlaps:
-        overlaps = _report_overlaps(fig, path.name, path.with_suffix(".overlap.txt"))
+        for page, label, sidecar, _ in pages:
+            overlaps += _report_overlaps(page, label, sidecar)
+    for page, _, _, _ in pages[1:]:
+        plt.close(page)
     if strict and overlaps:
         raise RuntimeError(
             f"{len(overlaps)} text overlap(s) in {path.name}; "
@@ -329,7 +357,8 @@ _PANEL_REF = re.compile(r"\([A-Z](?:[,–-][A-Z])?\)")  # (A), (A,B), (A-D), (A�
 def justified_legend(fig, title: str, body: str, *, x0: float = 0.06,
                      x1: float = 0.94, y_top: float | None = None, fontsize: float = 10,
                      line_spacing: float = 1.5, bottom_margin: float = 0.03,
-                     min_fontsize: float = 8.0) -> float:
+                     min_fontsize: float = 8.0, justify: bool | str = "auto",
+                     max_justified_lines: int = 3) -> float:
     """Render a paper-style figure legend: a **bold** ``title`` run followed by ``body``,
     fully justified between ``x0``..``x1`` (figure fraction), starting with the first
     line's top at ``y_top`` and growing downward (conventions 1 & 5).
@@ -340,6 +369,19 @@ def justified_legend(fig, title: str, body: str, *, x0: float = 0.06,
     the analytical approach, so the figure stands alone. The last line is left-aligned
     (standard for justified paragraphs). Words are placed individually because matplotlib
     has no native full justification.
+
+    LONG LEGENDS ARE NOT JUSTIFIED [USER 2026-09-12]. Full justification stretches the
+    inter-word gaps to a different width on every line, and over many lines those gaps line
+    up vertically into pale "rivers" that the eye follows down the block instead of along
+    the line. Two or three lines never accumulate enough of them to matter; ten do, and a
+    detailed legend routinely runs to ten and beyond.
+
+    ``justify`` is ``"auto"`` by default: justified at ``max_justified_lines`` (3) wrapped
+    lines or fewer, ragged-right beyond that. It is decided on the WRAPPED LINE COUNT rather
+    than on the character count, because lines are what rivers actually depend on -- the same
+    body justifies in a wide figure and goes ragged in a narrow one, which is right in both.
+    Pass ``True``/``False`` to force it. The last line of a justified block is left-aligned
+    either way.
 
     Overlap safety (convention 3: a legend must NEVER obscure any panel/axis/figure text):
     - ``y_top=None`` (default) auto-places the legend's top just below the lowest panel
@@ -404,12 +446,23 @@ def justified_legend(fig, title: str, body: str, *, x0: float = 0.06,
             break
         fs -= 0.5
 
+    # Justify only a SHORT block -- see the docstring. Decided HERE, after the final wrap,
+    # so it follows the line count actually rendered rather than the one the first trial
+    # font size would have given.
+    if isinstance(justify, str):
+        if justify != "auto":
+            raise ValueError(f"justify must be True, False or 'auto'; got {justify!r}")
+        justify_block = len(lines) <= max_justified_lines
+    else:
+        justify_block = bool(justify)
+
     line_h_px = fs * line_spacing * fig.dpi / 72.0
     y = y_top * figh
     for li, line in enumerate(lines):
         wsum = sum(widths[i] for i in line)
         n = len(line)
-        gap = space if (li == len(lines) - 1 or n == 1) else (line_px - wsum) / (n - 1)
+        stretch = justify_block and li != len(lines) - 1 and n > 1
+        gap = (line_px - wsum) / (n - 1) if stretch else space
         x = x0 * figw
         for i in line:
             word, bold = runs[i]
@@ -425,6 +478,91 @@ def justified_legend(fig, title: str, body: str, *, x0: float = 0.06,
 # Automated text-overlap self-check (convention 3: no on-figure text may overlap
 # another text or a panel). Run automatically by savefig / pdf_savefig.
 # ---------------------------------------------------------------------------
+def check_legend_integrity(fig, *, expect_fontsize: float | None = None):
+    """Assert a justified legend is intact; return its ``(fontsize, line_count)``.
+
+    The overlap gate cannot see inside a legend: :func:`justified_legend` tags every word
+    with one gid, so :func:`check_text_overlaps` treats the block as a single artist --
+    right for legend-against-panel, blind to word-against-word. Justification places each
+    word at its own MEASURED x, so a metrics error does not shift the block, it closes the
+    gap between two particular words until they touch, and the figure saves clean while
+    printing ``twowords`` run together. Only a pairwise check sees that.
+
+    Words sharing a box TOP are one line -- every word is anchored ``va="top"``, so tops
+    coincide across a line while bottoms move with descenders and would split one line into
+    several, then compare words that are not neighbours.
+
+    Pass ``expect_fontsize`` to also require the block did not shrink, which is the signal
+    that the reserved band is too small rather than that anything is wrong with the text.
+    """
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    words = [(t.get_window_extent(renderer), t.get_text(), t.get_fontsize())
+             for t in fig.texts if t.get_gid() == "legend"]
+    if not words:
+        raise RuntimeError("no legend words found; justified_legend did not run on this figure")
+
+    lines: list[list] = []
+    for box, text, _ in sorted(words, key=lambda w: (-w[0].y1, w[0].x0)):
+        if lines and abs(lines[-1][0][0].y1 - box.y1) < 1.0:
+            lines[-1].append((box, text))
+        else:
+            lines.append([(box, text)])
+    for line in lines:
+        for (a, a_text), (b, b_text) in zip(line, line[1:]):
+            if b.x0 - a.x1 <= 0.0:
+                raise RuntimeError(f"legend words {a_text!r} and {b_text!r} collide "
+                                   f"({b.x0 - a.x1:.1f} px apart)")
+
+    size = max(w[2] for w in words)
+    if expect_fontsize is not None and size < expect_fontsize - 0.01:
+        raise RuntimeError(
+            f"legend settled at {size:.2f} pt, below the {expect_fontsize:.2f} pt asked for: "
+            "the reserved band is too small, so make the figure taller and enlarge the "
+            "bottom margin rather than accepting the smaller text")
+    return size, len(lines)
+
+
+def detail_legend_page(width_in: float, title: str, body: str, *, x0: float = 0.06,
+                       x1: float = 0.94, fontsize: float = 10, line_spacing: float = 1.5,
+                       margin_in: float = 0.5):
+    """Build the detailed legend as its own page, to follow the figure page in one PDF.
+
+    TWO legends, not one. The figure page carries a BRIEF legend in the style of a journal
+    caption: what each panel shows and nothing a reader does not need in order to read the
+    panels. Everything else a figure has to record to stand alone -- windows, thresholds,
+    exclusions, n, provenance, and why each non-obvious choice was made -- goes here, at
+    full size, on a page of its own. A single long legend holds exactly the same content,
+    but the crucial sentence cannot be found in it, which is the failure this splits.
+
+    The page is sized by MEASUREMENT, not guessed. The block is laid out once on a canvas
+    tall enough that it cannot be forced to shrink, which settles the line count at this
+    measure; the real page is then made exactly that tall. So the detailed legend never
+    shrinks below ``fontsize`` and its page is never mostly blank. Pass the figure page's
+    own panel margins as ``x0``/``x1`` so the two pages share a measure.
+    """
+    # Laid out first on a deliberately tall probe canvas: justified_legend shrinks the
+    # font only when the block will not fit above bottom_margin, so a canvas this tall
+    # guarantees the line count comes back at the full size.
+    probe_in = 60.0
+    probe = plt.figure(figsize=(width_in, probe_in))
+    probe_top = 1.0 - margin_in / probe_in
+    probe_bottom = justified_legend(probe, title, body, x0=x0, x1=x1, y_top=probe_top,
+                                    fontsize=fontsize, line_spacing=line_spacing,
+                                    bottom_margin=0.0)
+    used_in = (probe_top - probe_bottom) * probe_in
+    plt.close(probe)
+
+    height_in = used_in + 2.0 * margin_in
+    page = plt.figure(figsize=(width_in, height_in))
+    justified_legend(page, title, body, x0=x0, x1=x1,
+                     y_top=1.0 - margin_in / height_in, fontsize=fontsize,
+                     line_spacing=line_spacing, bottom_margin=0.0)
+    # Same gate the figure page gets: the right size, and no two words touching.
+    check_legend_integrity(page, expect_fontsize=fontsize)
+    return page
+
+
 def _intersection_area(a, b) -> float:
     """Area of the intersection of two display-space Bboxes (0 if disjoint)."""
     x0, x1 = max(a.x0, b.x0), min(a.x1, b.x1)
